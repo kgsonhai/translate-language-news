@@ -13,4 +13,10 @@ export class ConvertTextController {
       translateReqDto.session_id,
     );
   }
+
+  @Post('/translate-text')
+  async translateText(@Body() body) {
+    const { text, currentLang } = body;
+    return await this.ConvertTextService.translateText(text, currentLang);
+  }
 }

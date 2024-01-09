@@ -21,14 +21,11 @@ export class Score {
   domain: string;
 
   @Column({ name: 'score' })
-  score: string;
+  score: number;
 
   @Column({ name: 'audio_path' })
   audioPath: string;
 
   @Column({ name: 'audio_path_en' })
   audioPathEn: string;
-
-  @Column({ name: 'img_urls' })
-  imgUrls: string;
 }

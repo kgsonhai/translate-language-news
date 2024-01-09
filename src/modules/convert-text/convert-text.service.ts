@@ -1,15 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { InjectRepository } from '@nestjs/typeorm';
 import { translate } from 'bing-translate-api';
 import { Model } from 'mongoose';
 
-import { Score } from 'src/entities/score.entity';
-import { Article } from 'src/schemas/article.schema';
-import { IsNull, Not, Repository } from 'typeorm';
-import { sleep, splitArrayIntoSubarrays, splitIntoChunks } from './utils';
 import { HttpService } from '@nestjs/axios';
+import { Score } from 'src/entities/score.entity';
 import { Session } from 'src/entities/session.entity';
+import { Article } from 'src/schemas/article.schema';
+import { Repository } from 'typeorm';
+import { splitIntoChunks } from './utils';
 
 @Injectable()
 export class ConvertTextService {
@@ -23,55 +23,79 @@ export class ConvertTextService {
   ) {}
 
   async saveSession(sessionId) {
-    const sessionById = await this.sessionRepository.findOneBy({
-      id: sessionId,
-    });
-    sessionById.finishedTime = new Date().toString();
-    sessionById.status = 'FINISHED';
-    return await this.sessionRepository.save(sessionById);
-  }
-
-  async handleSaveAudio(sessionId, uuid, text) {
     try {
-      const endpoint = 'http://localhost:3001/convert-audio-vi-to-en';
-      const result = await this.httpService.post(endpoint, {
-        uuid,
-        text,
+      const sessionById = await this.sessionRepository.findOneBy({
+        id: sessionId,
       });
-      return result.subscribe(async (resonse) => {
-        const score = await this.scoreRepository.findOneBy({
-          articleId: uuid,
-          sessionId: sessionId,
-        });
-        console.log({ res: resonse.data.msg.uuid });
-        if (resonse.data.msg.uuid) {
-          score.audioPathEn = `https://graduation-project-api.s3.amazonaws.com/${resonse?.data?.msg?.uuid}`;
-          const res = await this.scoreRepository.save(score);
-          console.log({ uuid: res?.articleId, session: res?.sessionId });
-        }
-      });
+      console.log('SAVE SESSION STARTED', sessionById);
+      if (sessionById) {
+        sessionById.finishedTime = new Date();
+        sessionById.status = 'FINISHED';
+        console.log('SAVE SESSION FINISHED');
+        return this.sessionRepository.save(sessionById);
+      }
     } catch (error) {
-      console.log({ error });
+      Logger.error(error);
     }
   }
 
-  async convertLanguage(sessionId) {
-    const scores = await this.scoreRepository.find({
-      where: {
-        sessionId: sessionId,
-        audioPath: Not(IsNull()),
-      },
+  async handleSaveAudio(sessionId, uuid, text) {
+    const endpoint = 'http://localhost:3001/convert-audio-vi-to-en';
+    const result = await this.httpService.post(endpoint, {
+      uuid,
+      text,
     });
 
-    const articles = await this.articleModel.find().exec();
+    result.subscribe(async (response) => {
+      const MAX_RETRIES = 10;
+      let retries = 0;
+      while (retries < MAX_RETRIES) {
+        try {
+          const score = await this.scoreRepository.findOneBy({
+            articleId: uuid,
+            sessionId: sessionId,
+          });
 
-    const scoresUuid = scores.map((score) => score.articleId);
+          if (response?.data?.msg?.uuid) {
+            score.audioPathEn = `https://graduation-project-api.s3.amazonaws.com/${response?.data?.msg?.uuid}`;
+            const res = await this.scoreRepository.save(score);
+            console.log({ uuid: res?.articleId, session: res?.sessionId });
+          }
 
-    const listUpdatedScore = articles.filter((article) =>
-      scoresUuid.includes(article.uuid),
-    );
+          break;
+        } catch (error) {
+          console.log(
+            `Transaction failed (attempt ${retries + 1}/${MAX_RETRIES}):`,
+          );
+          retries++;
+          await new Promise((resolve) => setTimeout(resolve, 10000));
+        }
+      }
 
+      if (retries === MAX_RETRIES) {
+        console.error('Max retries reached. Unable to complete transaction.');
+      }
+    });
+  }
+
+  async convertLanguage(sessionId) {
     try {
+      const scores = (
+        await this.scoreRepository.find({
+          where: {
+            sessionId: sessionId,
+          },
+        })
+      ).filter((score) => score.score > 0);
+
+      const articles = await this.articleModel.find().exec();
+
+      const scoresUuid = scores.map((score) => score.articleId);
+
+      const listUpdatedScore = articles.filter((article) =>
+        scoresUuid.includes(article.uuid),
+      );
+
       const translationPromises = listUpdatedScore.map(async (article) => {
         const translatedContent = [];
 
@@ -93,7 +117,7 @@ export class ConvertTextService {
 
       const translations = await Promise.all(translationPromises);
 
-      const updateContentPromises = await translations.map(
+      const updateContentsPromise = translations.map(
         async ({ articleUuid, translatedTitle, translatedContent }: any) => {
           return await this.articleModel.updateOne(
             { uuid: articleUuid },
@@ -106,21 +130,36 @@ export class ConvertTextService {
           );
         },
       );
-      await Promise.all(updateContentPromises);
+      await Promise.all(updateContentsPromise);
 
-      for (const translation of translations) {
-        const { articleUuid, translatedTitle, translatedContent } = translation;
-        await this.handleSaveAudio(
+      for (let i = 0; i < translations.length; i++) {
+        const { articleUuid, translatedTitle, translatedContent } =
+          translations[i];
+        this.handleSaveAudio(
           sessionId,
           articleUuid,
           translatedTitle + '.' + translatedContent,
         );
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        await new Promise((resolve) => setTimeout(resolve, 15000));
       }
 
-      return await this.saveSession(sessionId);
+      this.saveSession(sessionId);
     } catch (error) {
-      console.log({ error });
+      const sessionById = await this.sessionRepository.findOneBy({
+        id: sessionId,
+      });
+      sessionById.finishedTime = new Date();
+      sessionById.status = 'FAILED';
+      this.sessionRepository.save(sessionById);
+      Logger.error(error);
     }
+  }
+
+  async translateText(text, currentLang) {
+    console.log({ text });
+    if (currentLang === 'vi') {
+      return await translate(text, 'vi', 'en');
+    }
+    return await translate(text, 'en', 'vi');
   }
 }

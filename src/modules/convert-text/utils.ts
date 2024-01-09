@@ -38,6 +38,11 @@ export function splitIntoChunks(str, chunkSize = 1000) {
   return chunks;
 }
 
-export async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export async function sleep(seconds: number, count?: number) {
+  await new Promise<void>((resolve) =>
+    setTimeout(() => {
+      count && count++;
+      resolve();
+    }, seconds),
+  );
 }
